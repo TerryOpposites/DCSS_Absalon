@@ -1266,6 +1266,11 @@ string weapon_unprojectability_reason(const item_def* wpn)
 spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
                             actor* katana_defender)
 {
+    const item_def *weapon = agent.weapon();
+    item_def *offhand = agent.offhand_weapon();
+    if (offhand && !is_melee_weapon(*offhand))
+        offhand = nullptr;
+
     bool found_unsafe_target = false;
     vector<actor*> targets;
     for (actor_near_iterator ai(&agent, LOS_NO_TRANS); ai; ++ai)
@@ -1286,18 +1291,19 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
         if (*ai == katana_defender)
             continue;
 
-        // If the player is casting, make a melee attack to test if we'd
-        // ordinarily need a prompt to hit this target, and ignore all such
-        // targets entirely.
+        // If the player is casting, check if hitting this target would
+        // ordinarily need a prompt and ignore all such targets entirely.
         //
         // We only perform this test for real casts, because otherwise the game
         // prints a misleading message to the player first (about there being
         // no targets in range)
         if (agent.is_player() && real)
         {
-            melee_attack atk(&you, *ai);
-            if (!atk.would_prompt_player())
+            if (katana_defender
+                || !player_unrand_bad_target(weapon, offhand, **ai, true))
+            {
                 targets.emplace_back(*ai);
+            }
             else
                 found_unsafe_target = true;
         }
@@ -1317,9 +1323,7 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
         return spret::abort;
     }
 
-    const item_def *weapon = agent.weapon();
-
-    if (real)
+    if (real && !katana_defender)
     {
         const string unproj_reason = weapon_unprojectability_reason(weapon);
         if (unproj_reason != "")
@@ -1333,8 +1337,14 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
     if (!real)
         return spret::success;
 
-    if (agent.is_player() && !katana_defender && !wielded_weapon_check(weapon))
-        return spret::abort;
+    if (agent.is_player() && !katana_defender)
+    {
+        if (!wielded_weapon_check(weapon))
+            return spret::abort;
+
+        if (player_unrand_bad_attempt(weapon, offhand, nullptr, false))
+            return spret::abort;
+    }
 
     fail_check();
 
@@ -1352,10 +1362,11 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
     const size_t max_targets = weapon ? 4 + div_rand_round(pow, 25)
                                       : 2 + div_rand_round(pow, 50);
     const int animation_delay = 80 / max_targets;
+    const size_t target_count = std::min(max_targets, targets.size());
 
     if ((Options.use_animations & UA_BEAM) != UA_NONE)
     {
-        for (size_t i = 0; i < max_targets && i < targets.size(); i++)
+        for (size_t i = 0; i < target_count; i++)
         {
             flash_tile(targets[i]->pos(), LIGHTMAGENTA, animation_delay,
                        TILE_BOLT_MANIFOLD_ASSAULT);
@@ -1363,14 +1374,14 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
         }
     }
 
-    for (size_t i = 0; i < max_targets && i < targets.size(); i++)
+    for (size_t i = 0; i < target_count; i++)
     {
         melee_attack atk(&agent, targets[i]);
         atk.is_projected = true;
         if (katana_defender)
         {
-            if (you.offhand_weapon() && is_unrandom_artefact(*you.offhand_weapon(), UNRAND_AUTUMN_KATANA))
-                atk.set_weapon(you.offhand_weapon(), true);
+            if (offhand && is_unrandom_artefact(*offhand, UNRAND_AUTUMN_KATANA))
+                atk.set_weapon(offhand, true);
             // Only the katana can attack through space!
             atk.attack();
         }
@@ -1378,11 +1389,8 @@ spret cast_manifold_assault(actor& agent, int pow, bool fail, bool real,
         else
             atk.launch_attack_set(i == 0);
 
-        if (i == 0)
-            you.time_taken = you.attack_delay().roll();
-
         // Stop further attacks if we somehow died in the process.
-        // (Unclear how this is possible?)
+        // (e.g. from riposte, spiny or injury mirror)
         if (agent.is_player() && (you.hp <= 0 || you.pending_revival)
             || agent.is_monster() && !agent.alive())
         {
